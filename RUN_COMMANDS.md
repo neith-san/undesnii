@@ -1,30 +1,29 @@
 # mn-data-prepare images: how to run them
 
-Published on GitHub Container Registry — pull instead of loading a tarball
-(tarballs are also still in this folder if you'd rather use those):
+This folder has the three image tarballs — `docker load` them on each machine
+(no internet/registry credentials needed, which matters since these are
+also published privately on GHCR and copying by USB is meant to avoid that
+dependency entirely):
 
-| Image | Size | Pull |
+| File | Image | Size |
 |---|---|---|
-| `mn-dataprep-coordinator` | 154MB | `docker pull ghcr.io/neith-san/mn-dataprep-coordinator:latest` |
-| `mn-dataprep-worker` | 369MB | `docker pull ghcr.io/neith-san/mn-dataprep-worker:latest` |
-| `mn-dataprep-ollama` | 3.72GB | `docker pull ghcr.io/neith-san/mn-dataprep-ollama:latest` (model weights download separately on first container start, not baked in) |
+| `coordinator.tar` | `mn-dataprep-coordinator:latest` | 154MB |
+| `worker.tar` | `mn-dataprep-worker:latest` | 369MB |
+| `ollama.tar` | `mn-dataprep-ollama:latest` | 3.72GB (model weights download separately on first container start, not baked in) |
 
-**These packages are private by default on GHCR.** Before pulling on a worker
-PC, either make them public (GitHub -> your profile -> Packages -> each
-package -> Package settings -> Change visibility), or `docker login ghcr.io`
-with a token that has `read:packages` scope on every machine that needs to
-pull.
+(Also on `ghcr.io/neith-san/mn-dataprep-{coordinator,worker,ollama}:latest` if
+you ever want to `docker pull` instead — those packages are private, so
+that path needs `docker login ghcr.io` with a `read:packages` token.)
 
 No Docker Swarm needed — plain `docker run` works fine, including `--gpus all` for
 the worker's GPU access (that's the whole point of avoiding Swarm here: Swarm's
 GPU generic-resource scheduling doesn't work reliably under Docker Desktop, but
 plain `docker run --gpus all` does).
 
-## Manager (this machine, 172.16.153.161)
+## Manager (172.16.153.161 — already done, images loaded and confirmed present)
 
 ```
-docker pull ghcr.io/neith-san/mn-dataprep-coordinator:latest
-docker tag ghcr.io/neith-san/mn-dataprep-coordinator:latest mn-dataprep-coordinator:latest
+docker load -i E:\undesnii\images\coordinator.tar
 
 docker run -d --name coordinator --restart=always -p 8000:8000 ^
   -v E:\undesnii\data:/data:ro ^
@@ -41,11 +40,11 @@ Check it's up: `curl http://127.0.0.1:8000/healthz`
 
 ## Each worker PC
 
+Copy this whole `images` folder over (USB is fine), then:
+
 ```
-docker pull ghcr.io/neith-san/mn-dataprep-ollama:latest
-docker pull ghcr.io/neith-san/mn-dataprep-worker:latest
-docker tag ghcr.io/neith-san/mn-dataprep-ollama:latest mn-dataprep-ollama:latest
-docker tag ghcr.io/neith-san/mn-dataprep-worker:latest mn-dataprep-worker:latest
+docker load -i ollama.tar
+docker load -i worker.tar
 
 docker network create genai-net
 
@@ -62,12 +61,13 @@ docker run -d --name worker --restart=always --network genai-net ^
   mn-dataprep-worker:latest
 ```
 
-`<path-to-shared-data>` / `<path-to-shared-data_prepare>` must point at the same
-content as the manager's `E:\undesnii\data` and `E:\undesnii\undesnii` --
-shared storage across all machines is not wired up yet (was going to be an
-NFS-in-a-container on the manager, still pending confirmation since it
-publishes port 2049). Without this, workers can't read corpus chunks or write
-output. Resolve this before starting workers for real.
+**Not resolved yet, blocks real work:** `<path-to-shared-data>` /
+`<path-to-shared-data_prepare>` must point at the same content as the
+manager's `E:\undesnii\data` and `E:\undesnii\undesnii`. Workers will start
+fine without this but every job will fail (can't read corpus chunks, can't
+write output). This needs a containerized NFS server on the manager
+(exports those two folders over the network) -- ask your Claude session to
+start it once you're ready for workers to actually do real work.
 
 ## Verify a worker is leasing work
 
