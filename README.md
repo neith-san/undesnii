@@ -93,9 +93,31 @@ bash scripts/label_workers.sh
 bash scripts/deploy_stack.sh
 
 # 4) Copy your source material into ../data/{text,images,audio}/ (see
-#    ../data/README.md), then:
+#    ../data/README.md) -- and/or pull the CulturaX Mongolian corpus from a
+#    remote dataset-serving API (run on the MANAGER HOST, not in a
+#    container -- see scripts/fetch_corpus.sh):
+CORPUS_API_URL=http://127.0.0.1:8420 CORPUS_API_TOKEN=... bash scripts/fetch_corpus.sh
+make scan
+
 bash scripts/status.sh
 ```
+
+### Pulling the CulturaX corpus instead of copying files by hand
+
+`pipeline/fetch_corpus.py` (invoked by `scripts/fetch_corpus.sh` /
+`make fetch-corpus`) talks to a small bearer-token HTTP API in front of the
+corpus (`GET /v1/batches/next`, `POST /v1/batches/{id}/ack`, Arrow IPC
+stream bodies) and writes each fetched batch as a `.jsonl` file under
+`../data/text/corpus/` -- from there it's indistinguishable from a file you
+copied in by hand, and `scan_inputs.py`/`make scan` picks it up the normal
+way. It's safe to re-run or interrupt: the API tracks its own served/acked
+cursor server-side, so restarting just continues where it left off.
+
+Run it on the **manager host**, not via `docker exec` into the coordinator
+container -- `docker-compose.swarm.yml` mounts `/data` read-only there, so
+writes from inside it will fail. `CORPUS_API_URL`/`CORPUS_API_TOKEN` are
+given to you out-of-band by whoever runs the corpus API; never commit real
+values for either.
 
 First boot on each GPU node pulls muse-glimmer:30b (~18GB) once into
 `/var/lib/genai/ollama` on that node's local disk — expect the first

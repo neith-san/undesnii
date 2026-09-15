@@ -64,6 +64,16 @@ chunking:
   text_chunk_chars_min: 600
   text_chunk_chars_max: 4000
 
+corpus:
+  # Optional: pull source text straight from a remote dataset-serving HTTP
+  # API (see pipeline/fetch_corpus.py) instead of only manually copying
+  # files into data/text/. Token is read from CORPUS_API_TOKEN (env), never
+  # stored here or anywhere else in the repo.
+  api_url: null          # e.g. http://127.0.0.1:8420 -- override via
+                          # PIPELINE_CORPUS__API_URL, see scripts/fetch_corpus.sh
+  max_rows: 2000          # rows per fetched batch / output .jsonl file
+  out_subdir: corpus       # written under data/text/<out_subdir>/
+
 asr:
   # Ollama/muse-glimmer has no audio modality, so audio is transcribed first
   # (faster-whisper) and the transcript is fed through the same text prompt
