@@ -37,9 +37,33 @@ if ! have_model "${BASE_MODEL}"; then
 fi
 
 echo "[bootstrap] building ${TAG} from ${MODELFILE} ..."
+# Ollama 0.34+ dropped support for the legacy {"modelfile": "<raw text>"}
+# request body -- /api/create now requires the base model, parameters and
+# system prompt as separate structured fields ({"error":"neither 'from' or
+# 'files' was specified"} if you send the old shape). Parse the tiny subset
+# of Modelfile syntax this file actually uses (FROM/PARAMETER/SYSTEM) into
+# that structured request instead of assuming the API accepts raw text.
 curl -fsS "${OLLAMA_HOST_URL}/api/create" -d "$(python3 -c '
-import json, sys
-print(json.dumps({"name": sys.argv[1], "modelfile": open(sys.argv[2]).read()}))
-' "${TAG}" "${MODELFILE}")"
+import json, re, sys
+mf = open(sys.argv[1]).read()
+from_model = re.search(r"^FROM\s+(\S+)", mf, re.M).group(1)
+params = {}
+for k, v in re.findall(r"^PARAMETER\s+(\S+)\s+(\S+)", mf, re.M):
+    try:
+        v = int(v)
+    except ValueError:
+        try:
+            v = float(v)
+        except ValueError:
+            pass
+    params[k] = v
+q = chr(34) * 3
+parts = mf.split(q)
+system = parts[1].strip() if len(parts) >= 3 else None
+payload = {"name": sys.argv[2], "from": from_model, "parameters": params}
+if system:
+    payload["system"] = system
+print(json.dumps(payload))
+' "${MODELFILE}" "${TAG}")"
 echo
 echo "[bootstrap] ${TAG} ready."
