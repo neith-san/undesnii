@@ -1,0 +1,97 @@
+# =============================================================================
+# data_prepare pipeline configuration
+# Shared by coordinator, worker, scan_inputs, dedup_merge.
+# Override any value with an environment variable of the same name (upper
+# case, PIPELINE_ prefix) -- see pipeline/config.py for the precedence rule.
+# =============================================================================
+
+paths:
+  # Raw, human-supplied source material. You copy files in here; nothing in
+  # this pipeline ever deletes or rewrites originals under data/.
+  data_root: /data
+  text_dir: /data/text
+  image_dir: /data/images
+  audio_dir: /data/audio
+
+  # Working + output area. Everything the pipeline produces lives here so a
+  # `rm -rf data_prepare/state data_prepare/output` is the only "start over"
+  # button anyone needs; leaving state/ alone is what makes resume work.
+  prepare_root: /data_prepare
+  state_dir: /data_prepare/state
+  output_dir: /data_prepare/output
+  media_cache_dir: /data_prepare/media_cache
+  hf_dataset_dir: /data_prepare/hf_dataset
+  logs_dir: /data_prepare/logs
+
+ollama:
+  host: http://ollama:11434     # per-node local Ollama (Swarm: mode=host, so
+                                 # workers reach it as http://127.0.0.1:11434
+                                 # or the service DNS name inside the overlay
+                                 # net -- see docker/docker-compose.swarm.yml)
+  base_model: muse-glimmer:30b  # pulled from the Ollama library
+  instructed_model: muse-glimmer-mn   # our Modelfile-customized tag, built by
+                                       # ollama/bootstrap_muse_glimmer.sh
+  think: high                   # low | medium | high | xhigh (muse-glimmer
+                                 # reasoning levels) -- high is the default so
+                                 # every row gets a real chain-of-thought in
+                                 # the `thinking` column; drop to "medium" if
+                                 # throughput matters more than trace depth
+  num_ctx: 16384
+  request_timeout_s: 600
+  max_retries: 3
+  retry_backoff_s: 5
+
+languages:
+  # Every knowledge item is emitted once per language below, sharing a
+  # pair_id, so English and Mongolian rows carry the *same* underlying fact.
+  # This both builds the mn benchmark and produces English replay data for
+  # the CPT stage (see PLAN.md P7 -- English PPL must not regress).
+  targets: [mn, en]
+
+task_mix:
+  # Task `type` values, matching the toorgil/mongolian-llm-benchmark schema.
+  # Weight is a relative sampling weight per source chunk, not a hard split.
+  qa: 0.30
+  mcq: 0.20
+  problem_solving: 0.15
+  instruction_following: 0.15
+  code: 0.10
+  dpo: 0.10
+
+difficulty_levels: [beginner, intermediate, advanced]
+
+chunking:
+  text_chunk_chars_min: 600
+  text_chunk_chars_max: 4000
+
+asr:
+  # Ollama/muse-glimmer has no audio modality, so audio is transcribed first
+  # (faster-whisper) and the transcript is fed through the same text prompt
+  # path. Runs on CPU by default so it never competes with muse-glimmer for
+  # the node's two A4000s; see docs on enabling GPU ASR.
+  model_size: medium
+  device: cpu
+  compute_type: int8
+  language_hint: null   # null = auto-detect; whisper handles mn + en
+
+images:
+  max_side_px: 1536      # resize before base64-encoding to keep requests fast
+  jpeg_quality: 90
+
+leasing:
+  batch_size: 4          # items handed out per /lease call
+  lease_ttl_s: 1200       # unfinished-after-this gets recycled to another worker
+  max_item_retries: 4     # after this many failures, item goes to dead-letter
+
+sharding:
+  rows_per_shard_file: 5000   # worker output jsonl rotation size
+
+split:
+  # Absolute counts (not percentages) mirroring the reference dataset, which
+  # ships a small held-out val/test against a much larger train.
+  validation_rows: 300
+  test_rows: 800
+
+huggingface:
+  repo_id: toorgil/mongolian-multimodal-sft   # used only by push_to_hub.py
+  private: true

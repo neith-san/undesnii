@@ -1,0 +1,16 @@
+# Thin wrapper around the official Ollama image that also bakes in our
+# bootstrap script + its small python/curl dependency, so a node coming up
+# fresh serves muse-glimmer-mn (not just bare muse-glimmer) with zero manual
+# steps beyond `docker stack deploy`.
+FROM ollama/ollama:latest
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ollama/Modelfile.muse-glimmer /opt/muse-glimmer/Modelfile.muse-glimmer
+COPY ollama/bootstrap_muse_glimmer.sh /opt/muse-glimmer/bootstrap_muse_glimmer.sh
+COPY ollama/entrypoint.sh /opt/muse-glimmer/entrypoint.sh
+RUN chmod +x /opt/muse-glimmer/*.sh
+
+ENTRYPOINT ["/opt/muse-glimmer/entrypoint.sh"]

@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY docker/requirements-coordinator.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY pipeline /app/pipeline
+COPY config /app/config
+COPY ollama /app/ollama
+
+ENV PYTHONUNBUFFERED=1 \
+    PIPELINE_CONFIG=/app/config/pipeline.yaml
+
+EXPOSE 8000
+CMD ["uvicorn", "pipeline.coordinator:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,23 @@
+# Copy to nodes.yaml and fill in your real inventory. Purely documentation /
+# a handy checklist for scripts/setup_worker.sh runs -- Swarm itself doesn't
+# read this file, `docker node ls` is the source of truth once nodes join.
+
+manager:
+  hostname: mgr01
+  ip: 10.0.0.10
+  role: swarm-manager + NFS server + coordinator
+
+workers:
+  # 20 x dual-A4000 (16GB each -> 32GB/node). muse-glimmer:30b is an 18GB
+  # download; with KV cache for num_ctx=16384 plus a couple of concurrent
+  # requests, plan on the full 32GB being used -- that's why every worker
+  # gets BOTH GPUs reserved for its one Ollama instance (no other GPU work
+  # is scheduled on the same node).
+  - hostname: gpu01
+    ip: 10.0.0.11
+  - hostname: gpu02
+    ip: 10.0.0.12
+  - hostname: gpu03
+    ip: 10.0.0.13
+  # ... repeat through gpu20 / 10.0.0.30
+  # (fill in the rest of your 20 nodes here)

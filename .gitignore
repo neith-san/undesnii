@@ -1,0 +1,14 @@
+.env
+.DS_Store
+__pycache__/
+*.pyc
+logs/*
+!logs/.gitkeep
+media_cache/*
+!media_cache/.gitkeep
+output/*
+!output/.gitkeep
+state/*
+!state/.gitkeep
+hf_dataset/*
+!hf_dataset/.gitkeep
