@@ -38,15 +38,37 @@ manual file-copying write to, from the host side, not through this container.
 
 Check it's up: `curl http://127.0.0.1:8000/healthz`
 
+## Shared storage (manager -> every worker)
+
+Run this once on the manager, before starting any workers -- exports
+`E:\undesnii\data` (read-only) and `E:\undesnii\undesnii` (read-write) over
+NFSv4 on port 2049:
+
+```
+docker rm -f genai-nfs 2>nul
+docker run -d --name genai-nfs --restart=always --cap-add SYS_ADMIN -p 2049:2049 ^
+  -v E:\undesnii\data:/srv/data ^
+  -v E:\undesnii\undesnii:/srv/data_prepare ^
+  -e NFS_EXPORT_0="/srv/data *(ro,fsid=0,no_subtree_check,insecure,no_root_squash)" ^
+  -e NFS_EXPORT_1="/srv/data_prepare *(rw,fsid=1,no_subtree_check,insecure,no_root_squash)" ^
+  erichough/nfs-server
+```
+
 ## Each worker PC
 
-Copy this whole `images` folder over (USB is fine), then:
+Copy this whole `images` folder over (USB is fine), then -- all plain
+`docker` commands, **no `sudo`, no WSL needed** (Docker Desktop's daemon
+mounts the NFS share itself, inside its own Linux VM):
 
 ```
 docker load -i ollama.tar
 docker load -i worker.tar
 
 docker network create genai-net
+
+REM shared storage from the manager -- one time per worker
+docker volume create --driver local --opt type=nfs4 --opt o=addr=172.16.153.161,ro --opt device=:/srv/data genai-data
+docker volume create --driver local --opt type=nfs4 --opt o=addr=172.16.153.161,rw --opt device=:/srv/data_prepare genai-data-prepare
 
 docker run -d --name ollama --restart=always --gpus all --network genai-net -p 11434:11434 ^
   -v ollama_cache:/root/.ollama ^
@@ -56,18 +78,10 @@ docker run -d --name ollama --restart=always --gpus all --network genai-net -p 1
 docker run -d --name worker --restart=always --network genai-net ^
   -e COORDINATOR_URL=http://172.16.153.161:8000 ^
   -e OLLAMA_HOST=http://ollama:11434 ^
-  -v <path-to-shared-data>:/data:ro ^
-  -v <path-to-shared-data_prepare>:/data_prepare ^
+  -v genai-data:/data:ro ^
+  -v genai-data-prepare:/data_prepare ^
   mn-dataprep-worker:latest
 ```
-
-**Not resolved yet, blocks real work:** `<path-to-shared-data>` /
-`<path-to-shared-data_prepare>` must point at the same content as the
-manager's `E:\undesnii\data` and `E:\undesnii\undesnii`. Workers will start
-fine without this but every job will fail (can't read corpus chunks, can't
-write output). This needs a containerized NFS server on the manager
-(exports those two folders over the network) -- ask your Claude session to
-start it once you're ready for workers to actually do real work.
 
 ## Verify a worker is leasing work
 
@@ -84,9 +98,11 @@ Run on the manager host (not through a container):
 CORPUS_API_URL=http://127.0.0.1:8420 CORPUS_API_TOKEN=<token> bash scripts/fetch_corpus.sh
 make scan
 ```
-(needs the SSH reverse tunnel from the HPC corpus host to be up, and a bash
-shell -- WSL/Ubuntu, or Git Bash works for this specific script since it's
-pure Python/venv, no apt-get involved)
+(needs the SSH reverse tunnel from the HPC corpus host to be up. WSL is
+currently broken on this manager -- use Git Bash instead, which doesn't
+need WSL at all: install Git for Windows if not already present, and make
+sure a Windows Python install is on PATH. This script is pure Python/venv,
+no apt-get involved, so Git Bash is enough.)
 
 ## Collecting the dataset later
 
