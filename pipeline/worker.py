@@ -1,16 +1,19 @@
-"""Main worker loop -- one process per GPU node (docker/docker-compose.swarm.yml
-runs this as a `global` service so exactly one instance lands on every node
-matching the gpu-worker placement constraint).
+"""Main worker loop -- one process per GPU node.
 
 Loop: lease a small batch of items from the coordinator -> for each item,
-depending on modality, build a prompt -> call this node's local Ollama
-(muse-glimmer-mn) once per target language -> validate + write rows to this
-worker's own shard file -> report done/failed back to the coordinator.
+fetch its source file over HTTP from the coordinator (GET /file -- no
+shared /data mount needed) -> depending on modality, build a prompt -> call
+this node's local Ollama (muse-glimmer-mn) once per target language ->
+validate + write rows to this worker's own local shard file -> report
+done/failed back to the coordinator.
 
-Writing only to files this process itself owns (output/<worker_id>/part-*)
-means concurrent workers never contend for the same file on the shared NFS
-mount, even though they all write under the same shared data_prepare/output
-tree that dedup_merge.py later reads in full.
+Writing only to files this process itself owns (output/<worker_id>/part-*),
+on this worker's own local disk, means concurrent workers never contend for
+the same file. There is no shared filesystem in this design at all --
+collect each worker's output/<worker_id>/ directory back to the manager
+(however's convenient -- USB, scp, etc.) before running dedup_merge.py,
+which is safe to run against a partial or re-copied set of shards since it
+dedupes by content-hash id.
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ import logging
 import os
 import random
 import socket
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -89,6 +93,20 @@ class ShardWriter:
             self._fh.close()
 
 
+def fetch_source_file(coordinator_url: str, rel_path: str) -> Path:
+    """Downloads a corpus source file from the coordinator's /file endpoint
+    into a temp file, preserving its suffix so the existing suffix-sniffing
+    readers (read_text_file's .jsonl handling, PIL, faster-whisper) work
+    unmodified on the result."""
+    resp = requests.get(f"{coordinator_url}/file", params={"path": rel_path}, timeout=60)
+    resp.raise_for_status()
+    suffix = Path(rel_path).suffix
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(resp.content)
+    return Path(tmp_path)
+
+
 def _encode_image(path: Path, max_side: int, quality: int) -> str:
     from PIL import Image
     img = Image.open(path).convert("RGB")
@@ -101,12 +119,15 @@ def _encode_image(path: Path, max_side: int, quality: int) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def process_text_item(item: dict, cfg: dict, client: OllamaClient) -> list[dict]:
-    path = Path(cfg["paths"]["data_root"]) / item["path"]
-    # Same reader scan_inputs.py used to compute chunk_index in the first
-    # place -- reusing it (rather than re-implementing the .jsonl handling
-    # here) is what guarantees chunk boundaries line up.
-    full_text = read_text_file(path)
+def process_text_item(item: dict, cfg: dict, client: OllamaClient, coordinator_url: str) -> list[dict]:
+    path = fetch_source_file(coordinator_url, item["path"])
+    try:
+        # Same reader scan_inputs.py used to compute chunk_index in the first
+        # place -- reusing it (rather than re-implementing the .jsonl handling
+        # here) is what guarantees chunk boundaries line up.
+        full_text = read_text_file(path)
+    finally:
+        path.unlink(missing_ok=True)
     chunks = chunk_text(full_text,
                          min_chars=cfg["chunking"]["text_chunk_chars_min"],
                          max_chars=cfg["chunking"]["text_chunk_chars_max"])
@@ -132,9 +153,12 @@ def process_text_item(item: dict, cfg: dict, client: OllamaClient) -> list[dict]
     return rows
 
 
-def process_image_item(item: dict, cfg: dict, client: OllamaClient) -> list[dict]:
-    path = Path(cfg["paths"]["data_root"]) / item["path"]
-    img_b64 = _encode_image(path, cfg["images"]["max_side_px"], cfg["images"]["jpeg_quality"])
+def process_image_item(item: dict, cfg: dict, client: OllamaClient, coordinator_url: str) -> list[dict]:
+    path = fetch_source_file(coordinator_url, item["path"])
+    try:
+        img_b64 = _encode_image(path, cfg["images"]["max_side_px"], cfg["images"]["jpeg_quality"])
+    finally:
+        path.unlink(missing_ok=True)
     task_type = pick_task_type(cfg["task_mix"])
     difficulty = pick_difficulty(cfg["difficulty_levels"])
     pair_id = make_pair_id(item["item_id"])
@@ -155,13 +179,16 @@ def process_image_item(item: dict, cfg: dict, client: OllamaClient) -> list[dict
     return rows
 
 
-def process_audio_item(item: dict, cfg: dict, client: OllamaClient) -> list[dict]:
-    path = Path(cfg["paths"]["data_root"]) / item["path"]
-    transcript = asr.transcribe(
-        path, Path(cfg["paths"]["media_cache_dir"]) / "transcripts", item["item_id"],
-        model_size=cfg["asr"]["model_size"], device=cfg["asr"]["device"],
-        compute_type=cfg["asr"]["compute_type"], language_hint=cfg["asr"]["language_hint"],
-    )
+def process_audio_item(item: dict, cfg: dict, client: OllamaClient, coordinator_url: str) -> list[dict]:
+    path = fetch_source_file(coordinator_url, item["path"])
+    try:
+        transcript = asr.transcribe(
+            path, Path(cfg["paths"]["media_cache_dir"]) / "transcripts", item["item_id"],
+            model_size=cfg["asr"]["model_size"], device=cfg["asr"]["device"],
+            compute_type=cfg["asr"]["compute_type"], language_hint=cfg["asr"]["language_hint"],
+        )
+    finally:
+        path.unlink(missing_ok=True)
     if not transcript.strip():
         return []
     task_type = pick_task_type(cfg["task_mix"])
@@ -226,7 +253,7 @@ def main():
             item_id = item["item_id"]
             try:
                 processor = PROCESSORS[item["modality"]]
-                rows = processor(item, cfg, client)
+                rows = processor(item, cfg, client, coordinator_url)
                 for row in rows:
                     errs = row.validate()
                     if errs:

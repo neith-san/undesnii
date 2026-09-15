@@ -1,6 +1,6 @@
 # mn-data-prepare images: how to run them
 
-This folder has the three image tarballs — `docker load` them on each machine
+This folder has the image tarballs — `docker load` them on each machine
 (no internet/registry credentials needed):
 
 | File | Image | Size |
@@ -16,65 +16,47 @@ you'd rather `docker pull` — those packages are private, needs
 No Docker Swarm needed — plain `docker run` works fine, including `--gpus all`
 for the worker's GPU access.
 
+**No NFS, no shared filesystem at all.** Workers fetch corpus source text
+from the coordinator over plain HTTP (`GET /file`) instead of a shared
+`/data` mount, and keep their generated output on their own local disk
+instead of a shared `/data_prepare` mount — collect each worker's output
+folder back to the manager later (USB, scp, whatever), then run the merge
+step. This sidesteps the whole NFS/virtiofs/Windows-networking mess
+entirely: workers only ever need plain network reachability to the
+coordinator's port 8000, nothing else.
+
 **Every command below is single-line on purpose.** `^` (cmd.exe) and `` ` ``
 (PowerShell) line-continuation characters don't work the same across shells,
-and mixing them up silently breaks multi-line commands (seen already on one
-worker PC). Single-line avoids the whole problem regardless of which shell
-you're in.
+and mixing them up silently breaks multi-line commands. Single-line avoids
+the problem regardless of which shell you're in.
 
 ## Manager (172.16.153.161 — already done)
-
-Images loaded, and running against two Docker named volumes (`genai-data`,
-`genai-data-prepare`) rather than direct Windows-path bind mounts — Windows
-drive paths are mounted into Docker Desktop's Linux VM via virtiofs/9p,
-which can't be re-exported over NFS, so the volumes are the real shared
-storage and `E:\undesnii\data` / `E:\undesnii\undesnii` are no longer what
-workers (or the coordinator) actually read from.
 
 ```
 docker run -d --name coordinator --restart=always -p 8000:8000 -v genai-data:/data:ro -v genai-data-prepare:/data_prepare -e PIPELINE_CONFIG=/app/config/pipeline.yaml mn-dataprep-coordinator:latest
 ```
 
-Check it's up: `curl http://127.0.0.1:8000/healthz`
-
-## Shared storage (manager -> every worker)
-
-Exports the two Docker volumes above -- `/srv/data` over NFSv4, `/srv/data_prepare`
-over NFSv3. **Both are needed on one export, not split across two servers**:
-NFSv4 only lets a client reach one `fsid=0` export directly (a second,
-independent export isn't reachable the normal way), and a single shared
-parent directory doesn't work either (`/srv` itself isn't a real distinct
-filesystem, so it can't be exported -- only the two volume-backed
-subdirectories under it can). NFSv3 has no such single-root restriction, so
-`data_prepare` uses that instead -- which is why this needs the extra
-rpcbind/mountd/statd ports (111, 32765, 32767) published alongside 2049:
-
-```
-docker run -d --name genai-nfs --restart=always --cap-add SYS_ADMIN -p 2049:2049 -p 2049:2049/udp -p 111:111 -p 111:111/udp -p 32765:32765 -p 32765:32765/udp -p 32767:32767 -p 32767:32767/udp -v genai-data:/srv/data -v genai-data-prepare:/srv/data_prepare -e NFS_EXPORT_0="/srv/data *(ro,fsid=0,no_subtree_check,insecure,no_root_squash)" -e NFS_EXPORT_1="/srv/data_prepare *(rw,fsid=1,no_subtree_check,insecure,no_root_squash)" erichough/nfs-server
-```
+Check it's up: `curl http://127.0.0.1:8000/healthz`. `/data` and `/data_prepare`
+here are local Docker volumes, used only by the coordinator itself -- nothing
+else needs to reach them directly anymore.
 
 ## Each worker PC
 
 Copy this whole `images` folder over (USB is fine), then — plain `docker`
-commands, no `sudo`, no WSL needed (Docker Desktop's daemon mounts the NFS
-share itself, inside its own Linux VM). Note **`/data` is NFSv4 but
-`/data_prepare` is NFSv3** (`type=nfs`, not `type=nfs4`, plus `nfsvers=3`) --
-see the note above for why:
+commands, no `sudo`, no WSL, no volume mounts to a shared path at all
+(`worker_output` below is a private local volume, just for this machine's
+own generated rows):
 
 ```
 docker load -i ollama.tar
 docker load -i worker.tar
 docker network create genai-net
-docker volume create --driver local --opt type=nfs4 --opt o=addr=172.16.153.161,ro --opt device=:/srv/data genai-data
-docker volume create --driver local --opt type=nfs --opt o=addr=172.16.153.161,rw,nfsvers=3 --opt device=:/srv/data_prepare genai-data-prepare
 docker run -d --name ollama --restart=always --gpus all --network genai-net -p 11434:11434 -v ollama_cache:/root/.ollama -e OLLAMA_HOST=0.0.0.0:11434 mn-dataprep-ollama:latest
-docker run -d --name worker --restart=always --network genai-net -e COORDINATOR_URL=http://172.16.153.161:8000 -e OLLAMA_HOST=http://ollama:11434 -v genai-data:/data:ro -v genai-data-prepare:/data_prepare mn-dataprep-worker:latest
+docker run -d --name worker --restart=always --network genai-net -e COORDINATOR_URL=http://172.16.153.161:8000 -e OLLAMA_HOST=http://ollama:11434 -v worker_output:/data_prepare mn-dataprep-worker:latest
 ```
 
 `docker network create genai-net` will error "already exists" if you're
-re-running after a partial failure — harmless, ignore it. If a previous
-attempt already created broken `genai-data`/`genai-data-prepare` volumes on
-this machine, remove them first: `docker volume rm genai-data genai-data-prepare`.
+re-running after a partial failure — harmless, ignore it.
 
 ## Verify a worker is leasing work
 
@@ -105,13 +87,24 @@ curl -s -X POST http://127.0.0.1:8000/rescan
 
 ## Collecting the dataset later
 
-Run inside the coordinator container (has the volume mounted already):
+Each worker's generated rows live in its own local `worker_output` volume,
+under `output/<worker_id>/part-*.jsonl`. Pull that out to a real path so you
+can copy it to the manager:
+
+```
+docker run --rm -v worker_output:/d -v <a local path>:/out alpine cp -r /d/output /out
+```
+
+Copy each worker's `output/<worker_id>/` folder into the manager's
+`genai-data-prepare` volume's `output/` (same trick, reversed -- mount
+`genai-data-prepare` and copy in), then, on the manager, run inside the
+coordinator container:
+
 ```
 docker exec -it coordinator python -m pipeline.dedup_merge
 ```
-Writes `hf_dataset/data/{train,validation,test}-*.parquet` into
-`genai-data-prepare`. To pull that out to a real filesystem path for
-inspection or pushing to the Hub:
-```
-docker run --rm -v genai-data-prepare:/d -v <a Windows path>:/out alpine cp -r /d/hf_dataset /out
-```
+
+Writes `hf_dataset/data/{train,validation,test}-*.parquet`. This is safe to
+run against a partial or re-copied set of shards -- it dedupes by
+content-hash `id`, so copying the same worker's output twice (or collecting
+mid-run and again later) never produces duplicate rows.

@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from . import config as cfgmod
@@ -35,6 +36,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 cfg = cfgmod.load()
 STATE_DIR = Path(cfg["paths"]["state_dir"])
 STATE_FILE = STATE_DIR / "coordinator_state.json"
+DATA_ROOT = Path(cfg["paths"]["data_root"]).resolve()
 LEASE_TTL_S = cfg["leasing"]["lease_ttl_s"]
 MAX_ITEM_RETRIES = cfg["leasing"]["max_item_retries"]
 
@@ -209,6 +211,19 @@ def complete(req: CompleteRequest):
             _completed_since_save = 0
             _reset_dirty()
     return {"ok": True}
+
+
+@app.get("/file")
+def get_file(path: str):
+    """Serves raw bytes of a corpus source file by its manifest-relative
+    path, so workers can read source material over plain HTTP instead of
+    needing a shared filesystem mount for /data at all."""
+    resolved = (DATA_ROOT / path).resolve()
+    if DATA_ROOT not in resolved.parents and resolved != DATA_ROOT:
+        raise HTTPException(400, "path escapes data root")
+    if not resolved.is_file():
+        raise HTTPException(404, "no such file")
+    return FileResponse(resolved)
 
 
 @app.post("/rescan")
