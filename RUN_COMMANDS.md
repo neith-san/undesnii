@@ -1,7 +1,24 @@
 # mn-data-prepare images: how to run them
 
-This folder has the image tarballs — `docker load` them on each machine
-(no internet/registry credentials needed):
+## Get the images (pick one)
+
+**Option A — download script (recommended, no USB needed):** the three
+images are published publicly on GHCR. On each machine, just run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File download_images.ps1
+```
+
+That's it — no `docker login`, no token, no file transfer. Just share
+`RUN_COMMANDS.md` and `download_images.ps1` (this folder, minus the
+tarballs) with whoever's setting up a machine, and they're self-sufficient.
+
+*(If a `docker pull` in that script fails with "unauthorized"/"denied", the
+GHCR packages have gone back to private — fix via GitHub profile → Packages
+→ each package → Package settings → Change visibility → Public.)*
+
+**Option B — tarballs (works with zero internet access):** this folder also
+has the raw image tarballs — `docker load` them on each machine:
 
 | File | Image | Size |
 |---|---|---|
@@ -9,9 +26,15 @@ This folder has the image tarballs — `docker load` them on each machine
 | `worker.tar` | `mn-dataprep-worker:latest` | 369MB |
 | `ollama.tar` | `mn-dataprep-ollama:latest` | 3.72GB (model weights download separately on first container start, not baked in) |
 
-(Also on `ghcr.io/neith-san/mn-dataprep-{coordinator,worker,ollama}:latest` if
-you'd rather `docker pull` — those packages are private, needs
-`docker login ghcr.io` with a `read:packages` token.)
+```
+docker load -i coordinator.tar
+docker load -i worker.tar
+docker load -i ollama.tar
+```
+
+Either option lands the same three local image tags
+(`mn-dataprep-{coordinator,worker,ollama}:latest`) — everything below is
+identical either way.
 
 No Docker Swarm needed — plain `docker run` works fine, including `--gpus all`
 for the worker's GPU access.
@@ -42,14 +65,12 @@ else needs to reach them directly anymore.
 
 ## Each worker PC
 
-Copy this whole `images` folder over (USB is fine), then — plain `docker`
-commands, no `sudo`, no WSL, no volume mounts to a shared path at all
-(`worker_output` below is a private local volume, just for this machine's
-own generated rows):
+After getting the images (Option A or B above) — plain `docker` commands,
+no `sudo`, no WSL, no volume mounts to a shared path at all (`worker_output`
+below is a private local volume, just for this machine's own generated
+rows):
 
 ```
-docker load -i ollama.tar
-docker load -i worker.tar
 docker network create genai-net
 docker run -d --name ollama --restart=always --gpus all --network genai-net -p 11434:11434 -v ollama_cache:/root/.ollama -e OLLAMA_HOST=0.0.0.0:11434 mn-dataprep-ollama:latest
 docker run -d --name worker --restart=always --network genai-net -e COORDINATOR_URL=http://172.16.153.161:8000 -e OLLAMA_HOST=http://ollama:11434 -v worker_output:/data_prepare mn-dataprep-worker:latest
