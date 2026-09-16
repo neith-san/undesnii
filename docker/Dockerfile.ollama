@@ -8,9 +8,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl python3 \
     && rm -rf /var/lib/apt/lists/*
 
+ENV BOOTSTRAP_READY_FILE=/tmp/muse-glimmer-mn.ready
+
 COPY ollama/Modelfile.muse-glimmer /opt/muse-glimmer/Modelfile.muse-glimmer
 COPY ollama/bootstrap_muse_glimmer.sh /opt/muse-glimmer/bootstrap_muse_glimmer.sh
 COPY ollama/entrypoint.sh /opt/muse-glimmer/entrypoint.sh
 RUN chmod +x /opt/muse-glimmer/*.sh
+
+# start-period is generous (40min) to cover a fresh node's one-time ~18GB
+# base-model pull without flapping "unhealthy" during normal first boot.
+# After that window, any node without the ready file -- still pulling past
+# this allowance, or permanently broken -- shows unhealthy in plain
+# `docker ps`/`docker inspect`, the single-glance fleet visibility that was
+# missing when a silent bootstrap failure burned an entire corpus batch.
+# Override --health-start-period at `docker run` time for nodes with
+# unusually slow links, no rebuild needed.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=2400s --retries=3 \
+  CMD ["/bin/sh", "-c", "test -f \"$BOOTSTRAP_READY_FILE\""]
 
 ENTRYPOINT ["/opt/muse-glimmer/entrypoint.sh"]

@@ -58,6 +58,34 @@ docker run -d --name worker --restart=always --network genai-net -e COORDINATOR_
 `docker network create genai-net` will error "already exists" if you're
 re-running after a partial failure — harmless, ignore it.
 
+### The ollama image now self-heals and reports real health
+
+Earlier `ollama.tar` builds had a bootstrap script that gave up permanently
+on the first transient `/api/pull`/`/api/create` failure, with no way to
+tell from the outside -- this is what caused a run where most nodes had a
+missing model and dead-lettered almost their entire share of the corpus
+before anyone noticed. The current image fixes this:
+
+- `docker ps` now shows real health for the `ollama` container --
+  `(health: starting)` while it's still pulling/building (up to 40 minutes
+  for a fresh ~18GB pull), `(unhealthy)` if bootstrap is genuinely stuck,
+  `(healthy)` once the model is ready. Check any worker at a glance with
+  just `docker ps`, no curl/exec needed.
+- If bootstrap fails, it retries with backoff internally, and then keeps
+  retrying the whole thing every 30 minutes in the background, forever --
+  no manual intervention needed for a transient failure to self-heal.
+- The `worker` container now waits for its local model to actually be
+  ready (not just for the ollama server to be reachable) before it leases
+  **any** work -- so a node stuck on `(unhealthy)` simply sits idle instead
+  of dead-lettering corpus items. Its logs show a "waiting for model ...
+  not leasing any work until it's ready" heartbeat while this is happening.
+
+**Reloading this image on a worker that already has the 18GB base model
+cached is cheap and safe** -- `docker rm -f ollama` does not touch the
+`ollama_cache` named volume, so `docker run` with the new image reuses the
+already-downloaded weights and only re-runs the fast `/api/create` step,
+no re-download.
+
 ## Verify a worker is leasing work
 
 ```

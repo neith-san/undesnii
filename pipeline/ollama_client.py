@@ -22,6 +22,14 @@ class GenerationError(RuntimeError):
     pass
 
 
+class ModelNotFoundError(GenerationError):
+    """The target model doesn't exist on this Ollama instance (HTTP 404 from
+    /api/chat) -- distinct from a transient/transport error, since retrying
+    the full generic budget is pointless if bootstrap never finished (or the
+    model was removed) on this node."""
+    pass
+
+
 @dataclass
 class GenerationResult:
     content: dict
@@ -84,6 +92,26 @@ class OllamaClient:
                     raise GenerationError(f"model never returned valid JSON: {e}") from e
                 return GenerationResult(content=parsed, thinking=thinking,
                                          raw_content_text=content_text)
+            except requests.HTTPError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status == 404:
+                    last_err = e
+                    log.warning("ollama call failed (attempt %d/%d): model '%s' not found "
+                                "(404) on %s -- bootstrap may not be complete on this node",
+                                attempt, self.max_retries, self.model, self.host)
+                    if attempt == 1:
+                        # One quick nudge only, in case bootstrap finished mid-race --
+                        # not worth burning the full generic retry budget on a 404.
+                        time.sleep(self.retry_backoff_s)
+                        continue
+                    raise ModelNotFoundError(
+                        f"model '{self.model}' not found on {self.host} (404) -- "
+                        f"is muse-glimmer bootstrap complete on this node?") from e
+                last_err = e
+                log.warning("ollama call failed (attempt %d/%d): HTTP %s: %s",
+                            attempt, self.max_retries, status, e)
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_backoff_s * attempt)
             except (requests.RequestException, GenerationError) as e:
                 last_err = e
                 log.warning("ollama call failed (attempt %d/%d): %s",
@@ -93,8 +121,25 @@ class OllamaClient:
         raise GenerationError(f"exhausted retries: {last_err}")
 
     def health(self) -> bool:
+        """True iff the Ollama HTTP server itself is reachable -- says
+        nothing about whether the target model actually exists. Use
+        model_ready() for that; a node whose bootstrap hasn't finished (or
+        failed) answers this fine while /api/chat 404s forever."""
         try:
             r = requests.get(f"{self.host}/api/version", timeout=5)
             return r.ok
+        except requests.RequestException:
+            return False
+
+    def model_ready(self) -> bool:
+        """True iff self.model is actually present in this Ollama's local
+        model list. Polls /api/tags directly rather than any sentinel file
+        the ollama container's own bootstrap may write, since worker and
+        ollama are separate containers with no shared filesystem."""
+        try:
+            r = requests.get(f"{self.host}/api/tags", timeout=10)
+            r.raise_for_status()
+            names = {m.get("name") for m in r.json().get("models", [])}
+            return self.model in names
         except requests.RequestException:
             return False

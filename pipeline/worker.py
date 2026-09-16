@@ -225,10 +225,31 @@ def main():
         num_ctx=cfg["ollama"]["num_ctx"], timeout_s=cfg["ollama"]["request_timeout_s"],
         max_retries=cfg["ollama"]["max_retries"], retry_backoff_s=cfg["ollama"]["retry_backoff_s"],
     )
-    log.info("worker %s waiting for ollama at %s ...", worker_id, client.host)
+    log.info("worker %s waiting for ollama server at %s ...", worker_id, client.host)
     while not client.health():
         time.sleep(5)
-    log.info("worker %s: ollama healthy, model=%s", worker_id, client.model)
+
+    # health() only proves the ollama HTTP server is reachable -- it says
+    # nothing about whether bootstrap ever actually created the model. A
+    # node whose bootstrap failed silently would otherwise start leasing
+    # immediately and dead-letter its entire share of the queue against a
+    # permanently-404ing model. Block here, unbounded, instead: a broken
+    # node simply never leases work rather than burning it.
+    log.info("worker %s: ollama server reachable, waiting for model '%s' to be ready "
+              "(bootstrap may still be pulling/building it) ...", worker_id, client.model)
+    poll_s = cfg["ollama"].get("model_wait_poll_interval_s", 15)
+    log_every_s = cfg["ollama"].get("model_wait_log_interval_s", 300)
+    waited_s = 0
+    while not client.model_ready():
+        time.sleep(poll_s)
+        waited_s += poll_s
+        if waited_s % log_every_s < poll_s:
+            log.warning("worker %s: still waiting for model '%s' on %s after %ds -- "
+                         "not leasing any work until it's ready (check this node's ollama "
+                         "container logs / HEALTHCHECK status)",
+                         worker_id, client.model, client.host, waited_s)
+    log.info("worker %s: model '%s' ready after %ds, entering lease loop",
+              worker_id, client.model, waited_s)
 
     writer = ShardWriter(Path(cfg["paths"]["output_dir"]), worker_id, cfg["sharding"]["rows_per_shard_file"])
     batch_size = cfg["leasing"]["batch_size"]

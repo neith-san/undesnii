@@ -18,3 +18,13 @@ docker stack ps "$STACK_NAME" --filter desired-state=running --format \
 echo
 echo "== job queue status (coordinator) =="
 curl -fsS "http://${MANAGER_IP}:8000/status" | python3 -m json.tool
+
+echo
+echo "== local ollama container health (run this ON each worker box) =="
+# Reflects the Dockerfile.ollama HEALTHCHECK: healthy/unhealthy/health:
+# starting. Only covers the host you run this on -- there's no
+# worker-host-inventory file in this repo to fan this out across the fleet
+# from one place; loop over your own host list if you have one, e.g.:
+#   for h in <hosts>; do ssh "$h" docker inspect -f '{{.Name}} {{.State.Health.Status}}' ollama; done
+docker ps --filter "name=ollama" --format 'table {{.Names}}\t{{.Status}}' 2>/dev/null \
+  || echo "(no local ollama container on this host)"

@@ -40,6 +40,10 @@ ollama:
   request_timeout_s: 600
   max_retries: 3
   retry_backoff_s: 5
+  model_wait_poll_interval_s: 15   # worker startup gate: how often to poll
+                                    # /api/tags for the model before leasing
+  model_wait_log_interval_s: 300   # heartbeat log cadence while waiting, so
+                                    # a stuck node is visible without spamming
 
 languages:
   # Every knowledge item is emitted once per language below, sharing a
