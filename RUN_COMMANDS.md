@@ -213,3 +213,56 @@ update ever changes the `/lease` or `/complete` JSON shape (an API
 contract change, not just internal logic), workers would need the
 matching new worker image rolled out at the same time -- hasn't happened
 yet, but worth checking before assuming a coordinator-only update is safe.
+
+## Project status / background (for picking this back up later)
+
+### Topology
+- **HPC box**: hosts the CulturaX Mongolian corpus + a custom Arrow-batch
+  HTTP API (`dataset_api/`, port 8420) serving it. Builds/pushes all three
+  images to GHCR.
+- **Manager** (`172.16.153.161`, Windows + Docker Desktop, user
+  `undesnii`): runs the `coordinator` container. Reached from the HPC box
+  via a persistent **SSH reverse tunnel** (`ssh -R 8420:127.0.0.1:8420
+  undesnii@172.16.153.161`, keypair `~/.ssh/dataset_tunnel_ed25519`,
+  script `dataset_api/tunnel.sh` on the HPC box, retry loop) because the
+  manager's network blocks *inbound* connections from the HPC box's
+  subnet on every port -- the HPC box has to connect *out* instead. The
+  manager reaches the HPC box's corpus API at its own `127.0.0.1:8420`
+  once that tunnel is up.
+- **Workers**: ~20 lab PCs (Windows + Docker Desktop). Distributed
+  incrementally so far, not all confirmed healthy yet.
+
+### Why the architecture looks the way it does
+- **No NFS/shared filesystem** -- tried first, hit real confirmed
+  blockers (Windows paths can't be re-exported over NFS from Docker
+  Desktop's VM; NFSv4 only lets a client reach one `fsid=0` export
+  directly; the manager's Docker Desktop/WSL2 backend was independently
+  unstable). Replaced with the `GET /file` + local-output design described
+  above -- workers need zero shared-storage mounts.
+- **No Docker Swarm** -- Swarm's GPU scheduling needs a real Docker Engine
+  (not Docker Desktop) with `nvidia-ctk --set-as-default` on every single
+  worker, which needs working Ubuntu WSL2 everywhere. Plain
+  `docker run --gpus all` sidesteps this and is what's actually deployed.
+- **GHCR images are public** by choice, specifically so this file +
+  `download_images.ps1` is enough to self-serve a new machine.
+- **Ollama bootstrap is self-healing** after an incident where 2,768/2,939
+  corpus items (94.8%) dead-lettered because most freshly-provisioned
+  nodes' bootstrap failed once, silently, permanently, and nothing
+  anywhere checked "does the model actually exist" vs. "is the ollama
+  server reachable" -- see the section above for the fix.
+
+### Known open issues
+- **Manager's WSL2/Ubuntu distro is broken**, suspected domain
+  GPO/endpoint-security policy on the `lab317` domain -- not fixable over
+  SSH, IT ticket was opened. This is why the deployment avoids needing
+  WSL anywhere it can.
+- The HPC box's root disk hit 0 bytes free once mid-build for reasons
+  unrelated to this project (not Docker, not this repo's scratch files) --
+  check `df -h /` there before large builds/pushes if things start failing
+  mysteriously.
+- Corpus loaded so far is small (one ~4,000-row test batch, 2,939 chunks)
+  -- run `fetch_corpus.py` again for a real production-scale batch once
+  the worker fleet is confirmed healthy.
+- Fleet-scale output collection (copying every worker's `worker_output`
+  back to the manager for `dedup_merge.py`) is documented above but not
+  yet exercised for real.
