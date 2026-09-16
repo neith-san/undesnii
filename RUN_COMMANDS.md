@@ -119,6 +119,41 @@ curl http://172.16.153.161:8000/status
 ```
 Counts should show items moving from `pending` -> `leased` -> `done`.
 
+## Stopping, pausing, and resuming generation
+
+**Pause one worker** (e.g. for GPU maintenance, a student needing the machine, etc.):
+```
+docker stop worker ollama
+```
+Safe, no data loss -- any items that worker was leasing expire server-side after
+`leasing.lease_ttl_s` (1200s / 20min) and go back to `pending` for another worker to pick up.
+Resume with:
+```
+docker start ollama worker
+```
+The worker's model-readiness gate means it correctly waits for ollama to report healthy again
+before it leases anything -- no manual coordination needed between the two containers.
+
+**Stop the whole fleet**: there's no single stop-everything command (this is plain
+`docker run` per machine, not Swarm) -- run `docker stop worker ollama` on each worker, and
+`docker stop coordinator` on the manager if you need that down too. **Watch out**: every
+container here runs `--restart=always`, which brings containers back after the *Docker
+daemon* restarts (e.g. a Windows reboot) even if you'd manually stopped them beforehand --
+so a reboot during planned downtime can silently un-pause generation. If you need downtime to
+survive a reboot, `docker stop` right before shutdown isn't enough by itself; recreate without
+`--restart=always`, or just remember to re-stop after the machine comes back up.
+
+**"Fresh start" (destructive, rare)** -- this is not the same as a normal stop/resume, it
+throws away real state:
+```
+docker volume rm worker_output              # on a worker: discards any generated rows not yet collected
+docker volume rm genai-data genai-data-prepare   # on the manager: discards the whole corpus load + job-queue history
+```
+Only do this after collecting whatever output matters (see "Collecting the dataset later"
+below) and only deliberately -- never as a first troubleshooting step for something that
+looks stuck. A stuck-looking node almost always just needs `docker logs` and the health-check
+guidance above, not a wipe.
+
 ## Load the corpus into the shared volume
 
 Run **on the manager** (already done once — 2,939 pending items loaded from
