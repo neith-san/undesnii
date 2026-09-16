@@ -5,6 +5,9 @@
 **Option A — download script (recommended, no USB needed):** the three
 images are published publicly on GHCR. On each machine, just run:
 
+Run from inside the folder containing the script (or give the full path),
+in an ordinary cmd or PowerShell prompt:
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File download_images.ps1
 ```
@@ -12,6 +15,8 @@ powershell -ExecutionPolicy Bypass -File download_images.ps1
 That's it — no `docker login`, no token, no file transfer. Just share
 `RUN_COMMANDS.md` and `download_images.ps1` (this folder, minus the
 tarballs) with whoever's setting up a machine, and they're self-sufficient.
+Takes a few minutes (mostly the ~3.7GB ollama image); once it finishes,
+continue with the "Manager" or "Each worker PC" commands below.
 
 *(If a `docker pull` in that script fails with "unauthorized"/"denied", the
 GHCR packages have gone back to private — fix via GitHub profile → Packages
@@ -157,3 +162,54 @@ Writes `hf_dataset/data/{train,validation,test}-*.parquet`. This is safe to
 run against a partial or re-copied set of shards -- it dedupes by
 content-hash `id`, so copying the same worker's output twice (or collecting
 mid-run and again later) never produces duplicate rows.
+
+## Extending to a new dataset (e.g. Wikipedia MN)
+
+**No new worker images needed.** Workers are dataset-agnostic -- they
+process whatever text chunk the coordinator hands them via `/lease` +
+`/file`, regardless of where it came from. Extending to a new source is
+purely a data-ingestion task:
+
+1. Get the new source into plain text or the same
+   `{"text": ..., "source": ..., ...}` JSONL shape `fetch_corpus.py`
+   produces (e.g. for Wikipedia MN: the `wikimedia/wikipedia` HF dataset's
+   `20231101.mn` config, or a WikiExtractor pass over the raw XML dump).
+2. Land it in the `genai-data` volume under its own subdirectory (keep
+   sources separate for provenance), same throwaway-container-copy trick
+   used everywhere else in this doc:
+   ```
+   docker run --rm -v genai-data:/data -v <host path with source text>:/src alpine cp -r /src/. /data/text/wikipedia/
+   ```
+3. Tell the coordinator to pick it up -- no restarts needed anywhere:
+   ```
+   curl -s -X POST http://172.16.153.161:8000/rescan
+   ```
+   New items appear as `pending` and every already-healthy worker starts
+   leasing them automatically.
+
+This only stops being true if a new source needs a genuinely different
+**modality** (the pipeline already has image/audio processors defined,
+just unused so far) or custom parsing beyond what `read_text_file`/
+`chunk_text` already handle -- that would need an actual worker/coordinator
+code change, not just new data.
+
+## Updating the manager (coordinator)
+
+Low-risk: **all coordinator state lives in the `genai-data-prepare` Docker
+volume** (`coordinator_state.json` checkpoint + `manifest.jsonl`), not in
+the container itself. Verified directly this session -- recreating the
+coordinator container with a new image preserves done/dead/pending counts
+intact. To roll out a new coordinator image:
+
+```
+docker pull ghcr.io/neith-san/mn-dataprep-coordinator:latest
+docker rm -f coordinator
+docker run -d --name coordinator --restart=always -p 8000:8000 -v genai-data:/data:ro -v genai-data-prepare:/data_prepare -e PIPELINE_CONFIG=/app/config/pipeline.yaml ghcr.io/neith-san/mn-dataprep-coordinator:latest
+```
+
+Workers don't need to know or care -- they just keep hitting the same
+`COORDINATOR_URL`, no changes needed on their end. **One caveat**: if an
+update ever changes the `/lease` or `/complete` JSON shape (an API
+contract change, not just internal logic), workers would need the
+matching new worker image rolled out at the same time -- hasn't happened
+yet, but worth checking before assuming a coordinator-only update is safe.
